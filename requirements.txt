@@ -1,6 +1,11 @@
 aiohttp
 httpx
-fal_client
 playwright
 beautifulsoup4
 Pillow
+
+# Azure Services
+azure-storage-blob>=12.19.0
+
+# Legacy (being phased out)
+fal_client  # Will be removed after full migration to Azure Blob Storage

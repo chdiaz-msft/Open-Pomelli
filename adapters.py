@@ -10,23 +10,153 @@ import os
 import aiohttp
 import httpx
 import fal_client
-from api_secrets import MUAPIAPP_API_KEY, FAL_KEY
+import uuid
+from azure.storage.blob import BlobServiceClient, ContentSettings
+from api_secrets import MUAPIAPP_API_KEY, FAL_KEY, AZURE_STORAGE_CONNECTION_STRING, AZURE_STORAGE_CONTAINER_NAME
 
+# Set environment variables
 os.environ["FAL_KEY"] = FAL_KEY
+
+
+# ---------------------------------------------------------
+# AZURE BLOB STORAGE UPLOADER
+# ---------------------------------------------------------
+
+class AzureBlobUploader:
+    """
+    Azure Blob Storage uploader for file hosting.
+    Replaces fal_client for file uploads.
+    """
+
+    def __init__(self):
+        """Initialize the Azure Blob Service Client."""
+        self.connection_string = AZURE_STORAGE_CONNECTION_STRING
+        self.container_name = AZURE_STORAGE_CONTAINER_NAME
+
+        if not self.connection_string:
+            raise ValueError("AZURE_STORAGE_CONNECTION_STRING is required")
+        if not self.container_name:
+            raise ValueError("AZURE_STORAGE_CONTAINER_NAME is required")
+
+        try:
+            self.blob_service_client = BlobServiceClient.from_connection_string(self.connection_string)
+            # Ensure container exists
+            try:
+                self.container_client = self.blob_service_client.get_container_client(self.container_name)
+                # Check if container exists (this will raise if it doesn't)
+                self.container_client.get_container_properties()
+            except Exception as e:
+                print(f"[AzureBlobUploader] Container '{self.container_name}' not accessible: {e}")
+                # Try to create it
+                print(f"[AzureBlobUploader] Attempting to create container...")
+                self.container_client = self.blob_service_client.create_container(self.container_name)
+                print(f"[AzureBlobUploader] Container '{self.container_name}' created successfully")
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize Azure Blob Storage: {e}")
+
+    def _get_content_type(self, file_path: str) -> str:
+        """
+        Determine content type from file extension.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            MIME type string
+        """
+        extension = Path(file_path).suffix.lower()
+        content_types = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+            '.svg': 'image/svg+xml',
+            '.bmp': 'image/bmp',
+            '.ico': 'image/x-icon',
+            '.mp4': 'video/mp4',
+            '.webm': 'video/webm',
+            '.mov': 'video/quicktime',
+            '.avi': 'video/x-msvideo',
+            '.json': 'application/json',
+            '.pdf': 'application/pdf',
+            '.txt': 'text/plain',
+            '.html': 'text/html',
+            '.css': 'text/css',
+            '.js': 'application/javascript',
+        }
+        return content_types.get(extension, 'application/octet-stream')
+
+    async def upload_file_async(self, file_path: str) -> str:
+        """
+        Upload a file to Azure Blob Storage asynchronously.
+
+        Args:
+            file_path: Path to the local file to upload
+
+        Returns:
+            Public URL of the uploaded file
+        """
+        # Generate a unique blob name
+        file_extension = Path(file_path).suffix
+        blob_name = f"{uuid.uuid4()}{file_extension}"
+
+        print(f"[AzureBlobUploader] Uploading {file_path} as {blob_name}")
+
+        try:
+            # Get blob client
+            blob_client = self.blob_service_client.get_blob_client(
+                container=self.container_name,
+                blob=blob_name
+            )
+
+            # Determine content type
+            content_type = self._get_content_type(file_path)
+            content_settings = ContentSettings(content_type=content_type)
+
+            # Upload file
+            with open(file_path, 'rb') as data:
+                blob_client.upload_blob(
+                    data,
+                    content_settings=content_settings,
+                    overwrite=True
+                )
+
+            # Get public URL
+            blob_url = blob_client.url
+            print(f"[AzureBlobUploader] Successfully uploaded: {blob_url}")
+
+            return blob_url
+
+        except Exception as e:
+            print(f"[AzureBlobUploader] Upload failed: {e}")
+            raise RuntimeError(f"Failed to upload file to Azure Blob Storage: {e}")
+
+
+# Global instance
+_azure_uploader = None
+
+def get_azure_uploader() -> AzureBlobUploader:
+    """Get or create the global AzureBlobUploader instance."""
+    global _azure_uploader
+    if _azure_uploader is None:
+        _azure_uploader = AzureBlobUploader()
+    return _azure_uploader
 
 
 # ---------------------------------------------------------
 # UTILITY FUNCTIONS
 # ---------------------------------------------------------
 
-async def ensure_url(file_path_or_url: str) -> str:
+async def ensure_url(file_path_or_url: str, use_azure: bool = True) -> str:
     """
-    Convert a local file path to a URL using fal_client, or return the URL as-is.
+    Convert a local file path to a URL using Azure Blob Storage, or return the URL as-is.
     Also handles problematic image formats by downloading, converting to PNG, and re-uploading.
-    
+
     Args:
         file_path_or_url: Either a local file path or an existing URL
-        
+        use_azure: If True (default), use Azure Blob Storage. If False, use fal_client (legacy)
+
     Returns:
         A valid URL (either the original URL or uploaded file URL)
     """
@@ -67,10 +197,15 @@ async def ensure_url(file_path_or_url: str) -> str:
                             with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
                                 img.save(tmp, format='PNG')
                                 tmp_path = tmp.name
-                            
-                            # Re-upload through fal_client
-                            print(f"[ensure_url] Re-uploading PNG through fal_client...")
-                            new_url = await fal_client.upload_file_async(tmp_path)
+
+                            # Re-upload through Azure or fal_client
+                            if use_azure:
+                                print(f"[ensure_url] Re-uploading PNG through Azure Blob Storage...")
+                                uploader = get_azure_uploader()
+                                new_url = await uploader.upload_file_async(tmp_path)
+                            else:
+                                print(f"[ensure_url] Re-uploading PNG through fal_client (legacy)...")
+                                new_url = await fal_client.upload_file_async(tmp_path)
                             
                             # Clean up temp file
                             import os
@@ -93,7 +228,12 @@ async def ensure_url(file_path_or_url: str) -> str:
     file_path = Path(file_path_or_url)
     if file_path.exists() and file_path.is_file():
         # Upload the file and return the URL
-        image_url = await fal_client.upload_file_async(str(file_path))
+        if use_azure:
+            uploader = get_azure_uploader()
+            image_url = await uploader.upload_file_async(str(file_path))
+        else:
+            # Legacy fallback
+            image_url = await fal_client.upload_file_async(str(file_path))
         return image_url
     
     # If neither URL nor valid file, raise an error
@@ -671,20 +811,27 @@ class WebScrapingAdapter:
                 
                 await page.screenshot(path=output_path, full_page=False)
                 print(f"[WebScrapingAdapter] Screenshot saved to {output_path}")
-                
+
                 await browser.close()
-                
-                # Upload to Fal for URL access if needed
-                if os.environ.get("FAL_KEY"):
-                    try:
-                        image_url = await fal_client.upload_file_async(output_path)
-                        print(f"[WebScrapingAdapter] Screenshot uploaded: {image_url}")
-                        return image_url
-                    except Exception as e:
-                        print(f"[WebScrapingAdapter] Upload failed: {e}")
-                        return output_path
-                
-                return output_path
+
+                # Upload to Azure Blob Storage for URL access
+                try:
+                    uploader = get_azure_uploader()
+                    image_url = await uploader.upload_file_async(output_path)
+                    print(f"[WebScrapingAdapter] Screenshot uploaded to Azure: {image_url}")
+                    return image_url
+                except Exception as e:
+                    print(f"[WebScrapingAdapter] Azure upload failed: {e}")
+                    # Fallback to fal_client if Azure fails and FAL_KEY is available
+                    if os.environ.get("FAL_KEY"):
+                        try:
+                            image_url = await fal_client.upload_file_async(output_path)
+                            print(f"[WebScrapingAdapter] Screenshot uploaded to fal.ai (fallback): {image_url}")
+                            return image_url
+                        except Exception as e2:
+                            print(f"[WebScrapingAdapter] Fallback upload also failed: {e2}")
+                            return output_path
+                    return output_path
                 
         except Exception as e:
             print(f"[WebScrapingAdapter] Screenshot failed: {e}")
