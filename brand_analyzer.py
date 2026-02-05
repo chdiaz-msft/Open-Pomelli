@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional
 import re
 import sys
 import os
+from urllib.parse import urlparse
 
 from adapters import VisionAdapter, WebScrapingAdapter, TextAdapter
 
@@ -69,9 +70,13 @@ class BrandAnalyzer:
             brand_guidelines=brand_guidelines,
             logo_data=logo_data
         )
-        
+
+        # Step 6: Enrich brand DNA if extractors failed or returned incomplete data
+        print(f"[BrandAnalyzer] Checking if enrichment is needed...")
+        brand_dna = await self.enrich_brand_dna(brand_dna, url)
+
         print(f"[BrandAnalyzer] ✅ Brand DNA extracted for {brand_dna.get('brand_name', 'Unknown')}")
-        
+
         return brand_dna
     
     async def _analyze_visual_elements(self, url: str, assets: Dict[str, Any]) -> Dict[str, Any]:
@@ -290,7 +295,168 @@ Extract and return as JSON:
             brand_dna["visual_style"]["primary_colors"] = brand_dna["visual_style"]["colors"][:2]
         
         return brand_dna
-    
+
+    async def enrich_brand_dna(self, brand_dna: Dict[str, Any], url: str) -> Dict[str, Any]:
+        """
+        Enrich brand_dna by using AI to fill missing or default values.
+
+        This addresses cases where structural extraction fails but we can
+        infer brand information from the URL, basic context, or AI reasoning.
+
+        Args:
+            brand_dna: Potentially incomplete brand DNA from extractors
+            url: Source URL for context
+
+        Returns:
+            Enriched brand DNA with filled gaps
+        """
+        # Check which fields need enrichment
+        needs_enrichment = self._check_if_needs_enrichment(brand_dna)
+
+        if not needs_enrichment:
+            print("[BrandAnalyzer] Brand DNA is complete, no enrichment needed")
+            return brand_dna
+
+        print("[BrandAnalyzer] Enriching incomplete brand DNA fields with AI...")
+
+        # Build enrichment prompt
+        prompt = f"""You are a brand analysis expert. Given a website URL and partial brand information, infer and complete the missing fields.
+
+URL: {url}
+
+Current Brand DNA (may have empty/default values):
+{json.dumps(brand_dna, indent=2)}
+
+Instructions:
+1. Analyze the URL and any available context
+2. Infer missing information based on:
+   - Domain name and URL structure
+   - Industry knowledge
+   - Common brand patterns
+3. For each empty or generic field, provide a reasonable inference
+4. If truly uncertain, use "Unknown" rather than making up facts
+
+Return ONLY the fields that need updating as JSON:
+{{
+  "brand_name": "inferred name from URL/context",
+  "industry": "specific industry (not 'general' or 'General')",
+  "tagline": "inferred or 'Unknown' if not inferrable",
+  "value_proposition": "inferred or 'Unknown'",
+  "tone_of_voice": ["inferred", "traits"],
+  "brand_personality": ["inferred", "traits"],
+  "target_audience": "inferred audience",
+  "key_messages": ["inferred messages if any"]
+}}
+
+Only include fields that you can meaningfully improve. Be specific, not generic."""
+
+        try:
+            responses = await self.text_adapter.generate(prompt, n=1)
+            response_text = responses[0]
+
+            # Clean and parse JSON
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+
+            enriched_fields = json.loads(response_text)
+
+            # Merge enriched fields into brand_dna
+            brand_dna_enriched = brand_dna.copy()
+            for key, value in enriched_fields.items():
+                # Only update if the enriched value is better than current
+                if self._is_better_value(brand_dna.get(key), value):
+                    brand_dna_enriched[key] = value
+                    print(f"[BrandAnalyzer] Enriched field '{key}': {value}")
+
+            # Mark as enriched
+            brand_dna_enriched["enrichment_applied"] = True
+            brand_dna_enriched["enrichment_method"] = "ai_inference"
+
+            return brand_dna_enriched
+
+        except json.JSONDecodeError as e:
+            print(f"[BrandAnalyzer] Failed to parse AI enrichment response: {e}")
+            # Fallback to basic URL parsing
+            return self._basic_url_fallback_enrichment(brand_dna, url)
+        except Exception as e:
+            print(f"[BrandAnalyzer] Enrichment error: {e}")
+            return self._basic_url_fallback_enrichment(brand_dna, url)
+
+    def _check_if_needs_enrichment(self, brand_dna: Dict[str, Any]) -> bool:
+        """Check if brand_dna has empty or generic default values."""
+        empty_checks = [
+            not brand_dna.get("brand_name") or brand_dna.get("brand_name") == "Brand",
+            brand_dna.get("industry", "").lower() in ["general", ""],
+            not brand_dna.get("tagline"),
+            not brand_dna.get("value_proposition"),
+            len(brand_dna.get("tone_of_voice", [])) <= 1,
+            len(brand_dna.get("brand_personality", [])) <= 1
+        ]
+        return any(empty_checks)
+
+    def _is_better_value(self, current_value: Any, new_value: Any) -> bool:
+        """Determine if new_value is better than current_value."""
+        # Empty/None check
+        if not current_value and new_value:
+            return True
+
+        # String checks
+        if isinstance(current_value, str):
+            generic_values = ["general", "brand", "business", "unknown", "n/a"]
+            if current_value.lower() in generic_values and new_value.lower() not in generic_values:
+                return True
+            if not current_value.strip() and new_value.strip():
+                return True
+
+        # List checks
+        if isinstance(current_value, list):
+            generic_list_items = ["professional", "trustworthy"]
+            if len(current_value) <= 1 and len(new_value) > 1:
+                return True
+            if all(item.lower() in generic_list_items for item in current_value) and new_value:
+                return True
+
+        return False
+
+    def _basic_url_fallback_enrichment(self, brand_dna: Dict[str, Any], url: str) -> Dict[str, Any]:
+        """Fallback enrichment using simple URL parsing."""
+        print("[BrandAnalyzer] Using fallback URL parsing for enrichment...")
+
+        parsed = urlparse(url)
+        domain = parsed.netloc.replace('www.', '')
+        brand_name = domain.split('.')[0].title()
+
+        brand_dna_copy = brand_dna.copy()
+
+        # Extract brand name from domain
+        if not brand_dna_copy.get("brand_name") or brand_dna_copy.get("brand_name") == "Brand":
+            brand_dna_copy["brand_name"] = brand_name
+            print(f"[BrandAnalyzer] Fallback: Extracted brand_name '{brand_name}' from URL")
+
+        # Infer industry from TLD
+        if brand_dna_copy.get("industry", "").lower() in ["general", ""]:
+            tld = parsed.netloc.split('.')[-1]
+            industry_map = {
+                'edu': 'Education',
+                'gov': 'Government',
+                'org': 'Non-profit',
+                'health': 'Healthcare',
+                'bank': 'Finance',
+                'shop': 'E-commerce',
+                'tech': 'Technology',
+                'io': 'Technology',
+                'ai': 'Artificial Intelligence'
+            }
+            brand_dna_copy["industry"] = industry_map.get(tld, "Business Services")
+            print(f"[BrandAnalyzer] Fallback: Inferred industry '{brand_dna_copy['industry']}' from TLD")
+
+        brand_dna_copy["enrichment_applied"] = True
+        brand_dna_copy["enrichment_method"] = "url_parsing_fallback"
+
+        return brand_dna_copy
+
     def _get_default_colors(self, industry: str) -> List[str]:
         """Get default color palette based on industry."""
         industry_colors = {
