@@ -141,7 +141,24 @@ Required packages:
 playwright install
 ```
 
-4. **Set up API keys** in `api_secrets.py`:
+4. **Install Playwright system dependencies** (Linux/WSL only):
+```bash
+playwright install-deps chromium
+```
+
+Or install manually:
+```bash
+sudo apt-get update
+sudo apt-get install -y libasound2 libatk-bridge2.0-0 libatk1.0-0 \
+  libatspi2.0-0 libcairo2 libcups2 libdbus-1-3 libdrm2 libgbm1 \
+  libglib2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 \
+  libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
+  libxkbcommon0 libxrandr2 xvfb
+```
+
+> **Note**: This step is only required on Linux/WSL. macOS and Windows users can skip this.
+
+5. **Set up API keys** in `api_secrets.py`:
 ```python
 MUAPIAPP_API_KEY = "your_muapi_key_here"
 FAL_KEY = "your_fal_key_here"
@@ -468,6 +485,7 @@ The agent can call these enhanced tools:
 - Active internet connection for API calls
 - Valid API keys (MUAPIAPP_API_KEY, FAL_KEY)
 - Playwright browsers installed (`playwright install`)
+- Playwright system dependencies (Linux/WSL: `playwright install-deps chromium`)
 - Python 3.8+ recommended
 
 ### Current Limitations
@@ -479,9 +497,10 @@ The agent can call these enhanced tools:
 - Screenshot analysis requires headless browser support
 
 ### Known Issues
-- Some websites may block automated scraping (use robots.txt compliant sites)
+- Some websites with strong anti-bot protection (Cloudflare, etc.) may still block scraping despite stealth features
 - Very complex websites may take longer to analyze
 - Image format conversion adds slight processing time
+- Linux/WSL users must install system dependencies (`playwright install-deps chromium`) for Playwright to work
 
 ## 🔜 Future Enhancements
 

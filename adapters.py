@@ -656,11 +656,23 @@ class WebScrapingAdapter:
             print("Please run: pip install playwright beautifulsoup4 && playwright install")
             return {"error": "Dependencies missing"}
 
+        browser = None
         try:
             async with async_playwright() as p:
-                # Launch browser
+                # Launch browser with stealth args
                 try:
-                    browser = await p.chromium.launch(headless=True)
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=[
+                            '--disable-blink-features=AutomationControlled',
+                            '--disable-features=IsolateOrigins,site-per-process',
+                            '--disable-site-isolation-trials',
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox',
+                            '--disable-web-security',
+                            '--disable-features=VizDisplayCompositor'
+                        ]
+                    )
                 except Exception as e:
                     print(f"[WebScrapingAdapter] Failed to launch browser: {e}")
                     print("Try running: playwright install")
@@ -668,9 +680,42 @@ class WebScrapingAdapter:
 
                 context = await browser.new_context(
                     user_agent=self.user_agent,
-                    viewport={"width": 1280, "height": 800}
+                    viewport={"width": 1280, "height": 800},
+                    extra_http_headers={
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Cache-Control': 'max-age=0'
+                    }
                 )
                 page = await context.new_page()
+
+                # Hide webdriver property
+                await page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+
+                    // Add chrome property
+                    window.chrome = {
+                        runtime: {}
+                    };
+
+                    // Mock plugins
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+
+                    // Mock languages
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en']
+                    });
+                """)
                 
                 # Navigate
                 try:
@@ -749,9 +794,31 @@ class WebScrapingAdapter:
                     for script in soup(["script", "style", "noscript"]):
                         script.decompose()
                     text = soup.get_text(separator=' ', strip=True)
-                    
+
+                    # Check for access denied / bot protection pages
+                    access_denied_indicators = [
+                        "access denied",
+                        "you don't have permission",
+                        "blocked by",
+                        "cloudflare",
+                        "please verify you are human",
+                        "captcha",
+                        "bot protection",
+                        "security check"
+                    ]
+                    text_lower = text.lower()
+                    title_lower = title.lower()
+
+                    if any(indicator in text_lower or indicator in title_lower for indicator in access_denied_indicators):
+                        print(f"[WebScrapingAdapter] Detected access denied/bot protection page")
+                        print(f"[WebScrapingAdapter] Title: {title}")
+                        print(f"[WebScrapingAdapter] Trying HTTP fallback...")
+                        if browser:
+                            await browser.close()
+                        return await self._fetch_url_fallback(url, timeout)
+
                     print(f"[WebScrapingAdapter] Successfully fetched {len(text)} chars")
-                    
+
                     return {
                         "url": url,
                         "status_code": status_code,
@@ -764,6 +831,14 @@ class WebScrapingAdapter:
                     
                 except Exception as e:
                     print(f"[WebScrapingAdapter] Navigation error: {e}")
+
+                    # Check if this is a bot protection error - try HTTP fallback
+                    if "ERR_HTTP2_PROTOCOL_ERROR" in str(e) or "ERR_CONNECTION" in str(e) or "ERR_TUNNEL_CONNECTION_FAILED" in str(e):
+                        print(f"[WebScrapingAdapter] Detected bot protection, trying HTTP fallback...")
+                        if browser:
+                            await browser.close()
+                        return await self._fetch_url_fallback(url, timeout)
+
                     return {
                         "url": url,
                         "status_code": 0,
@@ -774,11 +849,162 @@ class WebScrapingAdapter:
                         "assets": {}
                     }
                 finally:
-                    await browser.close()
-                    
+                    if browser:
+                        try:
+                            await browser.close()
+                        except:
+                            pass
+
         except Exception as e:
             print(f"[WebScrapingAdapter] Critical error: {e}")
             return {"error": str(e)}
+
+    async def _fetch_url_fallback(self, url: str, timeout: int = 30) -> Dict[str, any]:
+        """
+        Fallback method using aiohttp for sites that block Playwright.
+        Provides basic scraping without JavaScript rendering.
+        """
+        print(f"[WebScrapingAdapter] Using HTTP fallback for: {url}")
+
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return {"error": "BeautifulSoup not installed"}
+
+        headers = {
+            'User-Agent': self.user_agent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0',
+            'DNT': '1'
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True) as response:
+                    status_code = response.status
+
+                    if status_code >= 400:
+                        print(f"[WebScrapingAdapter] HTTP fallback failed with status {status_code}")
+                        return {
+                            "url": url,
+                            "status_code": status_code,
+                            "error": f"HTTP {status_code}",
+                            "text": "",
+                            "title": "",
+                            "metadata": {},
+                            "assets": {}
+                        }
+
+                    content = await response.text()
+                    soup = BeautifulSoup(content, 'html.parser')
+
+                    # Extract metadata
+                    title = soup.title.string if soup.title else ""
+                    metadata = {}
+
+                    desc_tag = soup.find('meta', attrs={'name': 'description'})
+                    if desc_tag:
+                        metadata['description'] = desc_tag.get('content', '')
+
+                    keywords_tag = soup.find('meta', attrs={'name': 'keywords'})
+                    if keywords_tag:
+                        metadata['keywords'] = keywords_tag.get('content', '')
+
+                    # Extract OpenGraph image
+                    og_image = soup.find('meta', attrs={'property': 'og:image'})
+                    og_image_url = og_image.get('content') if og_image else None
+
+                    # Clean text
+                    for script in soup(["script", "style", "noscript"]):
+                        script.decompose()
+                    text = soup.get_text(separator=' ', strip=True)
+
+                    # Check for access denied / bot protection (fallback failed too)
+                    access_denied_indicators = [
+                        "access denied",
+                        "you don't have permission",
+                        "blocked by",
+                        "cloudflare",
+                        "please verify you are human",
+                        "captcha",
+                        "bot protection",
+                        "security check"
+                    ]
+                    text_lower = text.lower()
+                    title_lower = title.lower()
+
+                    if any(indicator in text_lower or indicator in title_lower for indicator in access_denied_indicators):
+                        print(f"[WebScrapingAdapter] HTTP fallback also blocked - strong bot protection detected")
+                        return {
+                            "url": url,
+                            "status_code": status_code,
+                            "error": "Access Denied - Website has strong bot protection (Akamai/Cloudflare/etc)",
+                            "text": "",
+                            "title": title,
+                            "metadata": {},
+                            "assets": {}
+                        }
+
+                    # Basic image extraction
+                    images = []
+                    for img in soup.find_all('img', src=True):
+                        img_src = img.get('src', '')
+                        if img_src.startswith('//'):
+                            img_src = 'https:' + img_src
+                        elif img_src.startswith('/'):
+                            from urllib.parse import urljoin
+                            img_src = urljoin(url, img_src)
+                        if img_src.startswith('http'):
+                            images.append({
+                                'src': img_src,
+                                'alt': img.get('alt', '')
+                            })
+
+                    print(f"[WebScrapingAdapter] HTTP fallback successful: {len(text)} chars extracted")
+
+                    return {
+                        "url": url,
+                        "status_code": status_code,
+                        "title": title,
+                        "text": text,
+                        "html": content,
+                        "metadata": metadata,
+                        "assets": {
+                            "colors": [],  # Can't extract computed colors without browser
+                            "fonts": [],
+                            "images": images[:20],
+                            "links": [],
+                            "icons": [],
+                            "og_image": og_image_url
+                        }
+                    }
+
+        except asyncio.TimeoutError:
+            print(f"[WebScrapingAdapter] HTTP fallback timeout")
+            return {
+                "url": url,
+                "status_code": 0,
+                "error": "Timeout",
+                "text": "",
+                "title": "",
+                "metadata": {},
+                "assets": {}
+            }
+        except Exception as e:
+            print(f"[WebScrapingAdapter] HTTP fallback error: {e}")
+            return {
+                "url": url,
+                "status_code": 0,
+                "error": str(e),
+                "text": "",
+                "title": "",
+                "metadata": {},
+                "assets": {}
+            }
 
     async def capture_screenshot(self, url: str, output_path: str = None) -> str:
         """
@@ -794,13 +1020,54 @@ class WebScrapingAdapter:
 
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-features=IsolateOrigins,site-per-process',
+                        '--disable-site-isolation-trials',
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-web-security',
+                        '--disable-features=VizDisplayCompositor'
+                    ]
+                )
                 context = await browser.new_context(
                     user_agent=self.user_agent,
-                    viewport={"width": 1280, "height": 800}
+                    viewport={"width": 1280, "height": 800},
+                    extra_http_headers={
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Cache-Control': 'max-age=0'
+                    }
                 )
                 page = await context.new_page()
-                
+
+                # Hide webdriver property
+                await page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+
+                    window.chrome = {
+                        runtime: {}
+                    };
+
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en']
+                    });
+                """)
+
                 await page.goto(url, wait_until="networkidle", timeout=30000)
                 
                 # Generate filename if not provided

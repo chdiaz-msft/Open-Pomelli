@@ -70,12 +70,23 @@ def print_brand_dna(brand_dna: dict) -> None:
         print(f"\n🎨 VISUAL STYLE")
 
         # Colors
-        if vs.get('colors'):
-            print(f"   Colors: {', '.join(vs['colors'][:8])}")
-        if vs.get('primary_colors'):
-            print(f"   Primary: {', '.join(vs['primary_colors'])}")
-        if vs.get('secondary_colors'):
-            print(f"   Secondary: {', '.join(vs['secondary_colors'])}")
+        colors = vs.get('colors', [])
+        primary_colors = vs.get('primary_colors', [])
+        secondary_colors = vs.get('secondary_colors', [])
+
+        # Check if all colors are black (indicates extraction failed)
+        all_colors = colors + primary_colors + secondary_colors
+        all_black = all_colors and all(c == '#000000' for c in all_colors)
+
+        if all_black:
+            print(f"   Colors: ⚠️  Could not extract colors from website")
+        else:
+            if colors:
+                print(f"   Colors: {', '.join(colors[:8])}")
+            if primary_colors:
+                print(f"   Primary: {', '.join(primary_colors)}")
+            if secondary_colors:
+                print(f"   Secondary: {', '.join(secondary_colors)}")
 
         # Typography
         if vs.get('typography'):
@@ -191,18 +202,6 @@ async def analyze_brand(url: str) -> None:
     print(f"\n🚀 Starting Brand DNA Analysis...")
     print(f"📍 Target: {url}")
 
-    # Check if URL is accessible
-    print(f"🔍 Checking if website is accessible...")
-    if not await check_url_accessible(url):
-        print(f"\n❌ Error: Cannot access {url}")
-        print(f"   Please verify:")
-        print(f"   • The website is online and accessible")
-        print(f"   • The URL is correct")
-        print(f"   • You have internet connectivity")
-        sys.exit(1)
-
-    print(f"✅ Website is accessible\n")
-
     # Create log file with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = f"brand_dna_analysis_{timestamp}.log"
@@ -255,11 +254,6 @@ def main():
     if export_json:
         # Run analysis and export as JSON
         async def export():
-            # Check if URL is accessible
-            if not await check_url_accessible(url):
-                print(json.dumps({"error": f"Cannot access {url}"}, indent=2), file=sys.stderr)
-                sys.exit(1)
-
             # Create log file with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             log_file = f"brand_dna_analysis_{timestamp}.log"
