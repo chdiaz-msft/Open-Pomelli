@@ -225,9 +225,9 @@ async def analyze_brand(url: str) -> None:
         print("\n❌ Error: No brand DNA was extracted")
 
     # Also offer JSON export option
-    print(f"\n💾 To export as JSON, run:")
-    print(f"   python brand_dna.py {url} --json > brand_dna.json")
-    print(f"\n📋 Full debug logs saved to: {log_file}")
+    # print(f"\n💾 To export as JSON, run:")
+    # print(f"   python brand_dna.py {url} --json > brand_dna.json")
+    # print(f"\n📋 Full debug logs saved to: {log_file}")
 
 
 def main():
