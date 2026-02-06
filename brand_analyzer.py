@@ -291,7 +291,7 @@ Extract and return as JSON:
         
         # Fallback colors
         if not brand_dna["visual_style"]["colors"]:
-            brand_dna["visual_style"]["colors"] = self._get_default_colors(brand_dna["industry"])
+            brand_dna["visual_style"]["colors"] = self._get_default_colors()
             brand_dna["visual_style"]["primary_colors"] = brand_dna["visual_style"]["colors"][:2]
         
         return brand_dna
@@ -457,19 +457,9 @@ Only include fields that you can meaningfully improve. Be specific, not generic.
 
         return brand_dna_copy
 
-    def _get_default_colors(self, industry: str) -> List[str]:
-        """Get default color palette based on industry."""
-        industry_colors = {
-            "technology": ["#0066CC", "#FFFFFF", "#00CC66"],
-            "finance": ["#003366", "#FFFFFF", "#FFD700"],
-            "healthcare": ["#0099CC", "#FFFFFF", "#00CC99"],
-            "food": ["#FF6B35", "#FFFFFF", "#FFA500"],
-            "fashion": ["#000000", "#FFFFFF", "#FF1493"],
-            "education": ["#4169E1", "#FFFFFF", "#FFD700"],
-            "real_estate": ["#2C5F2D", "#FFFFFF", "#DAA520"],
-            "entertainment": ["#FF0000", "#FFFFFF", "#FFD700"],
-        }
-        return industry_colors.get(industry.lower(), ["#0066CC", "#FFFFFF", "#00CC66"])
+    def _get_default_colors(self) -> List[str]:
+        """Get default color palette - returns all black to signify color extraction failed."""
+        return ["#000000", "#000000", "#000000"]
 
     # Removed old extract_logo and analyze_logo as they are now integrated
 
